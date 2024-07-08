@@ -4,7 +4,7 @@ pub trait TileSetExt {
 }
 
 impl TileSetExt for riichi::prelude::TileSet37 {
-    /// Converts a hand in the [`riichi::prelude::TileSet37`] format to readable shorthand (e.g. 123m456p789s1155z)
+    /// Converts a hand in the [`riichi::prelude::TileSet37`] format to human-readable shorthand (e.g. 123m456p789s1155z)
     fn to_shorthand(&self) -> String {
         self.iter_tiles()
             .sorted_by_key(|x| x.suit_char())

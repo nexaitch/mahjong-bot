@@ -1,11 +1,18 @@
-use crate::{utils::type_name_of, MahjongAgent, PlayerInformation};
+use crate::{player_information::PlayerInformation, utils::type_name_of, MahjongAgent, PlayerReactionInformation};
 use log::{debug, error, info};
 use rand::prelude::*;
 use riichi::prelude::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct GameSummary {
+    pub final_points: [GamePoints; 4],
+    pub round_histories: Vec<RoundHistory>,
+}
 
 /// Start a round of Mahjong with 4 agents.
 #[timed::timed(duration(printer = "info!"))]
-pub fn play_mahjong(agents: &mut [Box<dyn MahjongAgent>; 4]) -> [GamePoints; 4] {
+pub fn play_mahjong(agents: &mut [Box<dyn MahjongAgent>; 4]) -> GameSummary {
     let mut rng = rand::thread_rng();
     let mut engine = Engine::new();
     let mut wall = wall::make_sorted_wall([1; 3]);
@@ -19,7 +26,13 @@ pub fn play_mahjong(agents: &mut [Box<dyn MahjongAgent>; 4]) -> [GamePoints; 4] 
         points: [25000; 4],
     };
     engine.begin_round(rb.clone());
+    let mut histories = Vec::new();
     loop {
+        let mut history = RoundHistory {
+            begin: rb.clone(),
+            steps: Vec::new(),
+            ron: [false; 4],
+        };
         while engine.end().is_none() {
             let actor = engine.state().core.actor;
             let info: PlayerInformation = (engine.state(), actor, &rb).into();
@@ -34,37 +47,48 @@ pub fn play_mahjong(agents: &mut [Box<dyn MahjongAgent>; 4]) -> [GamePoints; 4] 
                     unreachable!() // player is out of bounds for some reason, probably engine fault
                 }
             }
-            for player in &[actor.succ(), actor.oppo(), actor.pred()] {
+            for &reactor in &[actor.succ(), actor.oppo(), actor.pred()] {
                 // compute reactions
                 if let Some(agent) = agents.get_mut(actor.to_u8() as usize) {
                     let agent = agent.as_mut();
-                    let reaction = agent.decide(&(info.clone(), action, *player));
+                    let info: PlayerInformation = (engine.state(), reactor, &rb).into();
+                    let reaction = agent.decide(&PlayerReactionInformation {
+                        player_information: info,
+                        reactor,
+                        action,
+                    });
                     if let Some(reaction) = reaction {
-                        try_register_reaction(&mut engine, *player, reaction, actor, agent, action);
-                        debug!("Player {player} reacted {reaction}");
+                        try_register_reaction(&mut engine, reactor, reaction, actor, agent, action);
+                        debug!("Player {reactor} reacted {reaction}");
                     }
                 }
             }
-            engine.step();
+            let gs = engine.step();
+            history.steps.push(gs);
         } // while round not ended
 
         // set up new round (if any)
         let round_end = engine.end().as_ref().expect("round not ended yet");
         info!("Round Ended: {round_end:?}");
-        // TODO process the game logs in some way for stats purposes
-        if let Some(nextround) = round_end.next_round_id {
+        // MAYBE fix this to only record it if the result was ron
+        history.ron = round_end.agari_result.clone().map(|x| x.is_some());
+        histories.push(history);
+        if let Some(next_round) = round_end.next_round_id {
             wall = wall::make_sorted_wall([1; 3]);
             wall.shuffle(&mut rng);
             rb = RoundBegin {
                 ruleset: ruleset.clone(),
-                round_id: nextround,
+                round_id: next_round,
                 wall,
                 pot: round_end.pot,
                 points: round_end.points,
             };
             engine.begin_round(rb.clone());
         } else {
-            break round_end.points;
+            break GameSummary {
+                final_points: round_end.points,
+                round_histories: histories,
+            };
         }
     } // loop
 }

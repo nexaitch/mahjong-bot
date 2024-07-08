@@ -1,72 +1,24 @@
-use riichi::prelude::*;
+use riichi::model::{Action, Discard, Reaction};
+use riichi::prelude::Player;
+
 use crate::play_mahjong;
+use crate::player_information::PlayerInformation;
 use crate::strategies::Strategy;
 
-/// Represents the information that a player can see.
-/// See [`riichi::model::State`] and [`riichi::model::StateCore`] for more information on these fields.
-#[derive(Clone)]
-pub struct PlayerInformation {
-    // attributes from RoundBegin
-    pub round_id: RoundId,
-    pub pot: GamePoints,
-    pub points: [GamePoints; 4],
-    // attributes from StateCore
-    pub seq: u8,
-    pub actor: Player,
-    pub num_drawn_head: u8,
-    pub num_drawn_tail: u8,
-    // it's a bit irritating that we have to pull this info from the wall but what else can we do honestly
-    pub dora_indicators: Vec<Tile>,
-    // can only view own draw
-    pub draw: Option<Tile>,
-    pub incoming_meld: Option<Meld>,
-    // can only view furiten flags for self
-    pub furiten: FuritenFlags,
-    pub riichi: [Option<Riichi>; 4],
-    // attributes from State, excluding StateCore
-    pub melds: [Vec<Meld>; 4],
-    pub closed_hand: TileSet37,
-    pub discards: [Vec<Discard>; 4],
-    pub discard_sets: [TileMask34; 4],
+/// Information required to decide how a player should react
+pub struct PlayerReactionInformation {
+    pub player_information: PlayerInformation,
+    pub reactor: Player,
+    pub action: Action,
 }
-
-impl From<(&State, Player, &RoundBegin)> for PlayerInformation {
-    fn from((state, player, round_begin): (&State, Player, &RoundBegin)) -> Self {
-        let wall = &round_begin.wall;
-        // if you are the current player, then select draw, else
-        let draw = (player == state.core.actor)
-            .then_some(state.core.draw)
-            .flatten();
-        // get dora indicators
-        let dora_indicators: Vec<_> = (0..state.core.num_dora_indicators as usize)
-            .map(|x| wall::dora_indicator(wall, x))
-            .collect();
-        PlayerInformation {
-            round_id: round_begin.round_id,
-            pot: round_begin.pot,
-            points: round_begin.points,
-            seq: state.core.seq,
-            actor: state.core.actor,
-            num_drawn_head: state.core.num_drawn_head,
-            num_drawn_tail: state.core.num_drawn_tail,
-            dora_indicators,
-            draw,
-            incoming_meld: state.core.incoming_meld,
-            furiten: state.core.furiten[player.to_usize()],
-            riichi: state.core.riichi,
-            melds: state.melds.clone(),
-            closed_hand: state.closed_hands[player.to_usize()].clone(),
-            discards: state.discards.clone(),
-            discard_sets: state.discard_sets,
-        }
-    }
-}
-
 // define helpful trait aliases for stuff
 pub trait ActionStrategy: Strategy<PlayerInformation, Action> {}
 impl<T: Strategy<PlayerInformation, Action>> ActionStrategy for T {}
-pub trait ReactionStrategy: Strategy<(PlayerInformation, Action, Player), Option<Reaction>> {}
-impl<T: Strategy<(PlayerInformation, Action, Player), Option<Reaction>>> ReactionStrategy for T {}
+pub trait ReactionStrategy:
+    Strategy<PlayerReactionInformation, Option<Reaction>>
+{
+}
+impl<T: Strategy<PlayerReactionInformation, Option<Reaction>>> ReactionStrategy for T {}
 #[allow(clippy::module_name_repetitions)] // having "Mahjong" as a trait name is probably weird
 pub trait MahjongAgent: ActionStrategy + ReactionStrategy {}
 impl<T: ActionStrategy + ReactionStrategy> MahjongAgent for T {}
@@ -78,8 +30,110 @@ impl Strategy<PlayerInformation, Action> for VeryStupid {
         play_mahjong::fallback_action(player_info.draw, &player_info.closed_hand)
     }
 }
-impl Strategy<(PlayerInformation, Action, Player), Option<Reaction>> for VeryStupid {
-    fn decide(&mut self, _state: &(PlayerInformation, Action, Player)) -> Option<Reaction> {
+impl Strategy<PlayerReactionInformation, Option<Reaction>> for VeryStupid {
+    fn decide(&mut self, _state: &PlayerReactionInformation) -> Option<Reaction> {
         None
+    }
+}
+
+pub struct Modular<R, D, K, T, R_, C> {
+    /// `Strategy<PlayerInformation, bool>` to determine if a player should call riichi.
+    riichi: R,
+    /// `Strategy<PlayerInformation, Discard>` to determine how a player should discard.
+    discard: D,
+    /// `Strategy<PlayerInformation, bool>` to determine if a player should ankan/kakan.
+    kan: K,
+    /// `Strategy<PlayerInformation, bool>` to determine if a player should tsumo.
+    tsumo: T,
+    // reactions
+    /// `Strategy<(PlayerInformation, Action, Player), bool>` to determine if a player should ron
+    ron: R_,
+    /// `Strategy<(PlayerInformation, Action, Player), Option<Reaction>>` to determine how a player should call.
+    /// Unlike the other functions here, this is called even if there are no possible melds to make.
+    call: C,
+}
+
+pub fn modular<R, D, K, T, R_, C>(
+    riichi: R,
+    discard: D,
+    kan: K,
+    tsumo: T,
+    ron: R_,
+    call: C,
+) -> Modular<R, D, K, T, R_, C>
+where
+    R: Strategy<PlayerInformation, bool>,
+    D: Strategy<PlayerInformation, Discard>,
+    K: Strategy<PlayerInformation, bool>,
+    T: Strategy<PlayerInformation, bool>,
+    R_: Strategy<PlayerReactionInformation, bool>,
+    C: Strategy<PlayerReactionInformation, Option<Reaction>>,
+{
+    Modular {
+        riichi,
+        discard,
+        kan,
+        tsumo,
+        ron,
+        call,
+    }
+}
+
+impl<R, D, K, T, R_, C> Strategy<PlayerInformation, Action> for Modular<R, D, K, T, R_, C>
+where
+R: Strategy<PlayerInformation, bool>,
+D: Strategy<PlayerInformation, Discard>,
+K: Strategy<PlayerInformation, bool>,
+T: Strategy<PlayerInformation, bool>,
+R_: Strategy<PlayerReactionInformation, bool>,
+C: Strategy<PlayerReactionInformation, Option<Reaction>>,
+{
+    #[allow(dead_code, unused_variables, unreachable_code, clippy::diverging_sub_expression)]
+    fn decide(&mut self, state: &PlayerInformation) -> Action {
+        if let Some(draw) = state.draw {
+            if todo!("can tsumo") && self.tsumo.decide(state) {
+                return Action::TsumoAgari(draw);
+            }
+            if state.riichi[state.actor.to_usize()].is_some() {
+                // tsumogiri
+                return Action::Discard(Discard {
+                    tile: draw,
+                    called_by: state.actor,
+                    declares_riichi: false,
+                    is_tsumogiri: true,
+                });
+            }
+            if todo!("can an/kakan") && self.kan.decide(state) {
+                // if tile is in hand, it's ankan, else kakan
+                return if state.closed_hand[draw.normal_encoding() as usize] > 0 {
+                    Action::Ankan(draw)
+                } else {
+                    Action::Kakan(draw)
+                };
+            }
+        }
+        let r = todo!("can riichi") && self.riichi.decide(state);
+        let mut d = self.discard.decide(state);
+        d.declares_riichi = r;
+        Action::Discard(d)
+    }
+}
+
+impl<R, D, K, T, R_, C> Strategy<PlayerReactionInformation, Option<Reaction>>
+    for Modular<R, D, K, T, R_, C>
+where
+R: Strategy<PlayerInformation, bool>,
+D: Strategy<PlayerInformation, Discard>,
+K: Strategy<PlayerInformation, bool>,
+T: Strategy<PlayerInformation, bool>,
+R_: Strategy<PlayerReactionInformation, bool>,
+C: Strategy<PlayerReactionInformation, Option<Reaction>>,
+{
+    #[allow(dead_code, unused_variables, unreachable_code, clippy::diverging_sub_expression)]
+    fn decide(&mut self, pri: &PlayerReactionInformation) -> Option<Reaction> {
+        let PlayerReactionInformation {player_information, reactor, action} = pri;
+        let ron = todo!("can ron") && self.ron.decide(pri);
+        ron.then_some(Reaction::RonAgari)
+            .or_else(|| self.call.decide(pri))
     }
 }
